@@ -1,0 +1,6 @@
+{
+  "name": "LDO Helpdesk & Service Portal",
+  "description": "ระบบจัดการคำร้องขอรับบริการผลิตสื่อ เทคโนโลยีระบบย่อย และแบบเอกสารของหน่วยงานฝ่ายออกแบบสื่อออนไลน์ (LDO) ช่วยเหลืออาจารย์และนักศึกษาพร้อมตัวช่วยเหลือ AI อัจฉริยะ",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

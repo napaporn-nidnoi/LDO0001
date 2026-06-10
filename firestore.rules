@@ -1,0 +1,131 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Reset Safety Net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- HELPER FUNCTION SCHEMAS & PRIMITIVES ---
+
+    // Check if the user is authenticated via Firebase Auth
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Check if user is using an institutional email address (Google Auth restriction check)
+    function isInstitutionalUser() {
+      return isSignedIn() && 
+             (request.auth.token.email.endsWith('@university.ac.th') || 
+              request.auth.token.email == 'napaporn.phub@gmail.com');
+    }
+
+    // Verify if the user owns the ticket being read or edited
+    function isTicketOwner(ticketData) {
+      return isSignedIn() && ticketData.reporter.email == request.auth.token.email;
+    }
+
+    // Check if user has staff role. In a production Spark system, we query a small 'staff' role lookup collection
+    function isLDOStaff() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/staff/$(request.auth.uid)) ||
+        request.auth.token.email == 'napaporn.phub@gmail.com' ||
+        request.auth.token.email == 'ldo_admin@university.ac.th'
+      );
+    }
+
+    // Validation pattern to prevent ID poisoning / malicious oversized URLs or names
+    function isValidId(id) {
+      return id is string && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.size() <= 128 && email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // Core validation blueprint for tickets creation
+    function isValidTicket(ticket) {
+      return ticket.ticketId is string && ticket.ticketId.size() <= 32 
+          && ticket.reporter is map
+          && ticket.reporter.name is string && ticket.reporter.name.size() <= 100
+          && ticket.reporter.userId is string && ticket.reporter.userId.size() <= 32
+          && ticket.reporter.type in ['student', 'teacher']
+          && ticket.reporter.department is string && ticket.reporter.department.size() <= 128
+          && ticket.reporter.phone is string && ticket.reporter.phone.size() <= 15
+          && ticket.reporter.email == request.auth.token.email // Identity integrity rule
+          
+          && ticket.jobDetails is map
+          && ticket.jobDetails.title is string && ticket.jobDetails.title.size() <= 200
+          && ticket.jobDetails.category in ['งานสื่อ', 'งานระบบ', 'งานเอกสาร']
+          && ticket.jobDetails.description is string && ticket.jobDetails.description.size() <= 4000
+          
+          && ticket.attachments is list
+          && ticket.attachments.size() <= 10 // Strictly bound array size
+          
+          && ticket.timeline is map
+          && ticket.timeline.createdAt is string
+          && ticket.timeline.deadline is string
+          
+          && ticket.status == 'pending' // Freshly generated tickets always start as pending
+          && ticket.assignedTo == null
+          && ticket.adminNote == ''
+          && ticket.satisfactionScore == null;
+    }
+
+    // --- TICKETS COLLECTION TARGET RULES ---
+    match /tickets/{ticketId} {
+      
+      // Allow read/get: If user is the original reporter or LDO Staff member
+      allow get: if isSignedIn() && (isTicketOwner(resource.data) || isLDOStaff());
+      
+      // Allow list queries: Force secure relational queries to prevent database scrapings
+      allow list: if isSignedIn() && (isLDOStaff() || resource.data.reporter.email == request.auth.token.email);
+
+      // Create parameters: Force schema validity, correct ownership metadata, and verified identity
+      allow create: if isInstitutionalUser() && isValidTicket(request.resource.data);
+
+      // Secure Tiered Update actions
+      allow update: if isSignedIn() && (
+        // Tier 1: LDO Staff actions (Assign tasks, update status, write notes, change timelines)
+        (isLDOStaff() && 
+         request.resource.data.ticketId == resource.data.ticketId &&
+         request.resource.data.reporter == resource.data.reporter &&
+         request.resource.data.jobDetails == resource.data.jobDetails &&
+         request.resource.data.attachments == resource.data.attachments && 
+         request.resource.data.satisfactionScore == resource.data.satisfactionScore &&
+         request.resource.data.status in ['pending', 'processing', 'completed', 'rejected']) 
+         
+         ||
+         
+         // Tier 2: Original User / Reporter actions (Limited only to feedback/satisfaction score submission on a completed state)
+         (isTicketOwner(resource.data) &&
+          resource.data.status == 'completed' && // Feedback is ONLY permitted on completed tickets (Terminal security)
+          request.resource.data.ticketId == resource.data.ticketId &&
+          request.resource.data.reporter == resource.data.reporter &&
+          request.resource.data.jobDetails == resource.data.jobDetails &&
+          request.resource.data.timeline == resource.data.timeline &&
+          request.resource.data.status == resource.data.status &&
+          request.resource.data.assignedTo == resource.data.assignedTo &&
+          request.resource.data.adminNote == resource.data.adminNote &&
+          // Validate input score is within limits [1-5 stars]
+          request.resource.data.satisfactionScore is int &&
+          request.resource.data.satisfactionScore >= 1 &&
+          request.resource.data.satisfactionScore <= 5 &&
+          // Allow keys update limit for user feedback
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['satisfactionScore', 'satisfactionComment'])
+         )
+      );
+
+      // Delete: Strictly PROHIBITED. Once a ticket is committed, it stays in history (Secure audit trails)
+      allow delete: if false;
+    }
+
+    // Role verification collection: admins/agents register here. 
+    // Reads are authenticated, writes restricted strictly to system administrators
+    match /staff/{staffId} {
+      allow read: if isSignedIn();
+      allow write: if false; // Configured manually in Firebase Admin Console
+    }
+  }
+}
